@@ -1,0 +1,100 @@
+name: Nexus Hermes Agent Deployment
+on: 
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/nexus-deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Environment & Docker
+      run: |
+        echo -e "\e[35m╔════════════════════════════════════╗\e[0m"
+        echo -e "\e[35m║     NEXUS HERMES DEPLOYMENT v2.2   ║\e[0m"
+        echo -e "\e[35m╚════════════════════════════════════╝\e[0m"
+        sudo apt-get remove -y containerd docker.io 2>/dev/null || true
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+        sudo sh /tmp/get-docker.sh
+        sudo systemctl enable docker
+        
+    - name: Install Tunneling Protocol
+      run: |
+        curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+        chmod +x cloudflared
+        sudo mv cloudflared /usr/local/bin/cloudflared
+        
+    - name: Setup Hermes Credentials
+      run: |
+        mkdir -p ~/.hermes
+        chmod 755 ~/.hermes
+        DASHBOARD_SECRET=$(openssl rand -base64 32)
+        API_SERVER_KEY=$(openssl rand -hex 32)
+        echo "API_SERVER_KEY=$API_SERVER_KEY" >> $GITHUB_ENV
+        
+        printf '%s\n' \
+          "HERMES_DASHBOARD_BASIC_AUTH_USERNAME=Admin" \
+          "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=Sinket@123#123" \
+          "HERMES_DASHBOARD_BASIC_AUTH_SECRET=$DASHBOARD_SECRET" \
+          "API_SERVER_ENABLED=true" \
+          "API_SERVER_HOST=0.0.0.0" \
+          "API_SERVER_KEY=$API_SERVER_KEY" \
+          "API_SERVER_CORS_ORIGINS=*" \
+          "HERMES_DASHBOARD=1" \
+          "HERMES_DASHBOARD_HOST=0.0.0.0" \
+          "HERMES_DASHBOARD_PORT=9119" \
+          > ~/.hermes/.env
+        chmod 600 ~/.hermes/.env
+        
+    - name: Start Hermes Agent
+      run: |
+        docker pull nousresearch/hermes-agent:latest
+        docker stop hermes 2>/dev/null || true
+        docker rm hermes 2>/dev/null || true
+        
+        docker run -d \
+          --name hermes \
+          --restart unless-stopped \
+          -p 8642:8642 \
+          -p 9119:9119 \
+          -v ~/.hermes:/opt/data \
+          --env-file ~/.hermes/.env \
+          nousresearch/hermes-agent:latest gateway run
+          
+        echo "Hermes container started"
+        sleep 30
+        docker ps
+        
+    - name: Start Assigned Tunnel
+      run: |
+        nohup cloudflared tunnel --url http://localhost:9119 > cloudflared.log 2>&1 &
+        echo "Waiting for Cloudflare tunnel..."
+        sleep 15
+        
+    - name: Output Connection Details
+      run: |
+        echo -e "\e[32m[SUCCESS] Tunnel Established!\e[0m"
+        echo -e "\e[35m======================================\e[0m"
+        echo -e "\e[35m    HERMES AGENT DASHBOARD ACCESS     \e[0m"
+        echo -e "\e[35m======================================\e[0m"
+        TUNNEL_URL=\$(grep -o 'https://[a-zA-Z0-9-]*\\.trycloudflare\\.com' cloudflared.log | head -1)
+        echo -e "\\e[36mCloudflare URL : \$TUNNEL_URL\\e[0m"
+        echo -e "\e[36mUsername       : Admin\e[0m"
+        echo -e "\e[36mPassword       : Sinket@123#123\e[0m"
+        echo -e "\e[36mAPI Key        : ${{ env.API_SERVER_KEY }}\e[0m"
+        echo -e "\e[36mGateway Port   : 8642\e[0m"
+        echo -e "\e[35m======================================\e[0m"
+        
+    - name: Keep Alive Monitor
+      run: |
+        echo "Hermes active for 6 hours max..."
+        for i in {360..1}; do
+            sleep 60
+        done
